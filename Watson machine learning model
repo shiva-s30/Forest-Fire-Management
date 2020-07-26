@@ -1,0 +1,115 @@
+!pip uninstall watson-machine-learning-client -y
+!pip install -U watson-machine-learning-client-V4
+!pip install -U autoai-libs
+from watson_machine_learning_client.helpers import DataConnection, S3Connection, S3Location
+
+training_data_reference = [DataConnection(
+    connection=S3Connection(
+        api_key='pCOpwiEvF6Bo48XhiBnONev5g-ZS06Y7o6u2_qGUtdAQ',
+        auth_endpoint='https://iam.bluemix.net/oidc/token/',
+        endpoint_url='https://s3.eu-geo.objectstorage.softlayer.net'
+    ),
+        location=S3Location(
+        bucket='forestfiremanagement-donotdelete-pr-tl2aqwblxeho2x',
+        path='forestfires.csv'
+    ))
+]
+training_result_reference = DataConnection(
+    connection=S3Connection(
+        api_key='pCOpwiEvF6Bo48XhiBnONev5g-ZS06Y7o6u2_qGUtdAQ',
+        auth_endpoint='https://iam.bluemix.net/oidc/token/',
+        endpoint_url='https://s3.eu-geo.objectstorage.softlayer.net'
+    ),
+    location=S3Location(
+        bucket='forestfiremanagement-donotdelete-pr-tl2aqwblxeho2x',
+        path='auto_ml/23ef83e7-e937-47a5-8506-761c47314039/wml_data/93473792-ecfe-4164-8a28-625b8e18964a/data/automl',
+        model_location='auto_ml/23ef83e7-e937-47a5-8506-761c47314039/wml_data/93473792-ecfe-4164-8a28-625b8e18964a/data/automl/hpo_d_output/Pipeline1/model.pickle',
+        training_status='auto_ml/23ef83e7-e937-47a5-8506-761c47314039/wml_data/93473792-ecfe-4164-8a28-625b8e18964a/training-status.json'
+    ))
+    experiment_metadata = dict(
+   prediction_type='regression',
+   prediction_column='area',
+   test_size=0.1,
+   scoring='neg_root_mean_squared_error',
+   csv_separator=',',
+   excel_sheet=0,
+   max_number_of_estimators=2,
+   training_data_reference = training_data_reference,
+   training_result_reference = training_result_reference)
+
+pipeline_name='Pipeline_2'
+from watson_machine_learning_client.experiment import AutoAI
+
+optimizer = AutoAI().runs.get_optimizer(metadata=experiment_metadata)
+pipeline_model = optimizer.get_pipeline(pipeline_name=pipeline_name)
+pipeline_model.pretty_print(combinators=False, ipython_display=True)
+pipeline_model.visualize()
+training_df, holdout_df = optimizer.get_data_connections()[0].read(with_holdout_split=True)
+
+train_X = training_df.drop([experiment_metadata['prediction_column']], axis=1).values
+train_y = training_df[experiment_metadata['prediction_column']].values
+
+test_X = holdout_df.drop([experiment_metadata['prediction_column']], axis=1).values
+y_true = holdout_df[experiment_metadata['prediction_column']].values
+
+from sklearn.metrics import r2_score
+
+predictions = pipeline_model.predict(test_X)
+score = r2_score(y_true=y_true, y_pred=predictions)
+print('r2_score: ', score)
+pipeline_model.pretty_print(combinators=False, ipython_display='input')
+
+from sklearn.linear_model import LinearRegression as E1
+from sklearn.tree import DecisionTreeRegressor as E2
+from sklearn.neighbors import KNeighborsRegressor as E3
+from lale.lib.lale import Hyperopt
+from lale.operators import TrainedPipeline
+from lale import wrap_imported_operators
+from lale.helpers import import_from_sklearn_pipeline
+wrap_imported_operators()
+
+prefix = pipeline_model.remove_last().freeze_trainable()
+prefix.visualize()
+
+new_pipeline = prefix >> (E1 | E2 | E3)
+new_pipeline.visualize()
+
+hyperopt = Hyperopt(estimator=new_pipeline, cv=3, max_evals=20, scoring='r2')
+fitted_hyperopt = hyperopt.fit(train_X, train_y)
+
+hyperopt_pipeline = fitted_hyperopt.get_pipeline()
+new_pipeline = hyperopt_pipeline.export_to_sklearn_pipeline()
+
+predictions = new_pipeline.predict(train_X)
+predictions = new_pipeline.predict(test_X)
+refined_score = r2_score(y_true=y_true, y_pred=predictions)
+print('r2_score: ', score)
+print('refined_r2_score: ', refined_score)
+
+wml_credentials = {
+  "apikey": "",
+  "iam_apikey_description": "",
+  "iam_apikey_name": "",
+  "iam_role_crn": "r",
+  "iam_serviceid_crn": "",
+  "instance_id": "",
+  "url": ""
+}
+
+from watson_machine_learning_client.deployment import WebService
+
+service = WebService(wml_credentials)
+
+service.create(
+    model=pipeline_model,
+    metadata=experiment_metadata,
+    deployment_name=f'{pipeline_name}_webservice'
+)
+
+print(service)
+
+service.get_params()
+
+predictions = service.score(payload=holdout_df.drop([experiment_metadata['prediction_column']], axis=1).iloc[:10])
+predictions
+
